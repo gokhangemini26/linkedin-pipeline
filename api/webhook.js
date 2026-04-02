@@ -1,13 +1,13 @@
-// api/webhook.js
+// api/webhook.js — Ana Telegram webhook handler
 const { research } = require('../lib/researcher');
 const { generatePosts } = require('../lib/generator');
 const { sendMessage, sendPostsWithButtons, sendSuccess, sendError } = require('../lib/telegram');
 const { publishPost } = require('../lib/linkedin');
 
-// Onay bekleyen postları geçici hafızada tut
-// (Vercel stateless olduğu için KV store yoksa basit global kullanıyoruz)
-// Production'da Vercel KV veya Redis kullan
-const pendingPosts = {};
+const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+
+// Oturum hafızası (Vercel stateless — tek request içinde yeterli)
+const sessions = {};
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -23,74 +23,96 @@ export default async function handler(req, res) {
       const { data, from } = body.callback_query;
       const userId = String(from.id);
 
-      // Callback'i acknowledge et
-      await fetch(
-        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callback_query_id: body.callback_query.id }),
+      // Acknowledge
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: body.callback_query.id }),
+      });
+
+      // Kaynak onayı — post üretmeye başla
+      if (data === 'approve_sources') {
+        const session = sessions[userId];
+        if (!session) {
+          await sendMessage(chatId, '⚠️ Oturum bulunamadı. Tekrar /linkedin komutu gönder.');
+          return res.status(200).json({ ok: true });
         }
-      );
 
-      if (data === 'cancel') {
+        await sendMessage(chatId, '✍️ Kaynaklar onaylandı! 3 varyant post üretiliyor...');
+        const posts = await generatePosts(session.konu, session.bakisAcisi, session.arastirma);
+        sessions[userId] = { ...session, posts };
+        await sendPostsWithButtons(chatId, session.konu, posts);
+        return res.status(200).json({ ok: true });
+      }
+
+      // Kaynak reddi
+      if (data === 'reject_sources') {
+        delete sessions[userId];
         await sendMessage(chatId, '❌ İptal edildi. Yeni içerik için /linkedin <konu> yaz.');
-        delete pendingPosts[userId];
         return res.status(200).json({ ok: true });
       }
 
-      const variant = data.replace('approve_', ''); // 'a', 'b' veya 'c'
-      const posts = pendingPosts[userId];
+      // Post onayı
+      if (data.startsWith('approve_')) {
+        const variant = data.replace('approve_', '');
+        const session = sessions[userId];
+        if (!session?.posts) {
+          await sendMessage(chatId, '⚠️ Post bulunamadı. Tekrar /linkedin komutu gönder.');
+          return res.status(200).json({ ok: true });
+        }
 
-      if (!posts) {
-        await sendMessage(chatId, '⚠️ Post bulunamadı. Tekrar /linkedin komutu gönder.');
+        const selectedPost = session.posts[variant];
+
+        // LinkedIn token varsa yayınla, yoksa sadece kopyalanabilir gönder
+        if (process.env.LINKEDIN_ACCESS_TOKEN && process.env.LINKEDIN_PERSON_ID) {
+          await sendMessage(chatId, '⏳ LinkedIn\'e yayınlanıyor...');
+          const result = await publishPost(selectedPost);
+          if (result.success) {
+            await sendSuccess(chatId, selectedPost);
+          } else {
+            await sendError(chatId, result.error);
+          }
+        } else {
+          await sendMessage(chatId, `✅ *Seçilen post — kopyala ve LinkedIn'e yapıştır:*\n\n${selectedPost}`);
+        }
+
+        delete sessions[userId];
         return res.status(200).json({ ok: true });
       }
 
-      const selectedPost = posts[variant];
-      await sendMessage(chatId, `⏳ LinkedIn'e yayınlanıyor...`);
-
-      const result = await publishPost(selectedPost);
-
-      if (result.success) {
-        await sendSuccess(chatId, selectedPost);
-        delete pendingPosts[userId];
-      } else {
-        await sendError(chatId, result.error);
+      // İptal
+      if (data === 'cancel') {
+        delete sessions[userId];
+        await sendMessage(chatId, '❌ İptal edildi. Yeni içerik için /linkedin <konu> yaz.');
+        return res.status(200).json({ ok: true });
       }
 
       return res.status(200).json({ ok: true });
     }
 
     // ── Normal Mesaj ──
-    if (!body.message) {
-      return res.status(200).json({ ok: true });
-    }
+    if (!body.message) return res.status(200).json({ ok: true });
 
     const message = body.message;
     const text = (message.text || '').trim();
     const userId = String(message.from.id);
 
-    // Güvenlik: sadece yetkili chat
-    if (String(message.chat.id) !== chatId) {
-      return res.status(200).json({ ok: true });
-    }
+    if (String(message.chat.id) !== chatId) return res.status(200).json({ ok: true });
 
-    // /start komutu
+    // /start
     if (text === '/start') {
-      await sendMessage(
-        chatId,
+      await sendMessage(chatId,
         `👋 *LinkedIn Pipeline Bot'a hoş geldin!*\n\n` +
-          `Kullanım:\n` +
-          `📌 \`/linkedin <konu>\` — Sadece konu\n` +
-          `📌 \`/linkedin <konu> | <bakış açısı>\` — Konu + görüşün\n\n` +
-          `Örnek:\n` +
-          `\`/linkedin AI ve tekstil ihracatı | Bu trendi kaçıranlar 2 yıla kadar geride kalacak\``
+        `📌 Kullanım:\n` +
+        `\`/linkedin <konu>\` — Sadece konu\n` +
+        `\`/linkedin <konu> | <bakış açısı>\` — Konu + görüşün\n\n` +
+        `Örnek:\n` +
+        `\`/linkedin AI ve tekstil ihracatı | Bence bu trendi kaçıranlar 2 yıla kadar geride kalır\``
       );
       return res.status(200).json({ ok: true });
     }
 
-    // /linkedin komutu
+    // /linkedin
     if (text.startsWith('/linkedin')) {
       const icerik = text.replace('/linkedin', '').trim();
 
@@ -99,45 +121,56 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // Konu ve bakış açısını ayır (| ile)
-      const [konu, bakisAcisi = ''] = icerik.split('|').map((s) => s.trim());
+      const [konu, bakisAcisi = ''] = icerik.split('|').map(s => s.trim());
 
-      // Başlangıç mesajı
-      await sendMessage(
-        chatId,
+      await sendMessage(chatId,
         `🔍 *"${konu}"* konusunda araştırma başladı...\n` +
-          `${bakisAcisi ? `💡 Bakış açısı: _${bakisAcisi}_\n` : ''}` +
-          `⏳ 2-3 dakika sürebilir, bekle.`
+        `${bakisAcisi ? `💡 _Bakış açısı: ${bakisAcisi}_\n` : ''}` +
+        `⏳ Kaynaklar aranıyor, biraz bekle...`
       );
 
-      // ADIM 1: Araştırma
-      await sendMessage(chatId, `📡 Web ve YouTube'da kaynaklar taranıyor...`);
+      // Araştırma yap
       const arastirma = await research(konu, bakisAcisi);
+      const { kaynaklar } = arastirma;
 
-      await sendMessage(
-        chatId,
-        `✅ ${arastirma.kaynaklar.length} kaynak bulundu.\n✍️ LinkedIn postları üretiliyor...`
-      );
+      // Session'a kaydet
+      sessions[userId] = { konu, bakisAcisi, arastirma };
 
-      // ADIM 2: Post üretimi
-      const posts = await generatePosts(konu, bakisAcisi, arastirma);
+      // Kaynakları Telegram'a gönder — onay iste
+      if (kaynaklar.length > 0) {
+        const kaynakListesi = kaynaklar
+          .map((k, i) => `${i + 1}. [${k.baslik}](${k.url})\n_${k.ozet?.slice(0, 120) || ''}..._`)
+          .join('\n\n');
 
-      // Postları hafızaya al
-      pendingPosts[userId] = posts;
-
-      // ADIM 3: Telegram'a gönder
-      await sendPostsWithButtons(chatId, konu, posts);
+        await sendMessage(chatId,
+          `✅ *${kaynaklar.length} kaynak bulundu:*\n\n${kaynakListesi}\n\n` +
+          `Bu kaynaklarla post üreteyim mi?`,
+          {
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '✅ Evet, post üret', callback_data: 'approve_sources' },
+                { text: '❌ İptal', callback_data: 'reject_sources' },
+              ]],
+            },
+          }
+        );
+      } else {
+        // Kaynak bulunamadı, yine de devam et
+        await sendMessage(chatId, `⚠️ Web kaynağı bulunamadı. Groq kendi bilgisiyle post üretiyor...`);
+        const posts = await generatePosts(konu, bakisAcisi, arastirma);
+        sessions[userId] = { konu, bakisAcisi, arastirma, posts };
+        await sendPostsWithButtons(chatId, konu, posts);
+      }
 
       return res.status(200).json({ ok: true });
     }
 
-    // Bilinmeyen komut
     await sendMessage(chatId, `❓ Komut tanınamadı. \`/start\` yaz veya \`/linkedin <konu>\` kullan.`);
     return res.status(200).json({ ok: true });
 
   } catch (err) {
     console.error('Webhook hatası:', err);
     await sendError(chatId, err.message || 'Bilinmeyen hata');
-    return res.status(200).json({ ok: true }); // Telegram 200 beklediği için her zaman 200
+    return res.status(200).json({ ok: true });
   }
 }
