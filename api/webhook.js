@@ -136,7 +136,7 @@ export default async function handler(req, res) {
           .join('\n\n');
 
         await sendMessage(chatId,
-          `✅ *${kaynaklar.length} kaynak bulundu:*\n\n${kaynakListesi}\n\n` +
+          `✅ *${kaynaklar.length} kaynak bulundu (${arastirma.aralikLabel || "son 7 gün"}):*\n\n${kaynakListesi}\n\n` +
           `Bu kaynaklarla post üreteyim mi?`,
           {
             reply_markup: {
