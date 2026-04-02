@@ -1,0 +1,13 @@
+{
+  "name": "linkedin-pipeline",
+  "version": "1.0.0",
+  "description": "Otomatik LinkedIn içerik üretim pipeline'ı",
+  "main": "api/webhook.js",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.0",
+    "node-fetch": "^3.3.2"
+  }
+}
