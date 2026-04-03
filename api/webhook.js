@@ -3,6 +3,7 @@ const { research } = require('../lib/researcher');
 const { generatePosts } = require('../lib/generator');
 const { sendMessage, sendPostsWithButtons, sendSuccess, sendError } = require('../lib/telegram');
 const { publishPost } = require('../lib/linkedin');
+const memory = require('../lib/skill-memory');
 
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 
@@ -64,6 +65,9 @@ export default async function handler(req, res) {
         }
         const selectedPost = session.posts[variant];
 
+        // 🧠 Skill memory — öğren
+        await memory.savePostSelection(session.konu, variant, session.posts);
+
         if (process.env.LINKEDIN_ACCESS_TOKEN && process.env.LINKEDIN_PERSON_ID) {
           await sendMessage(chatId, '⏳ LinkedIn\'e yayınlanıyor...');
           const result = await publishPost(selectedPost);
@@ -90,6 +94,26 @@ export default async function handler(req, res) {
     const userId = String(message.from.id);
 
     if (String(message.chat.id) !== chatId) return res.status(200).json({ ok: true });
+
+    // /stats
+    if (text === '/stats') {
+      const stats = await memory.getSkillStats();
+      const total = stats.toplamPost;
+      const pref = stats.varyantTercihleri;
+      await sendMessage(chatId,
+        `📊 *LinkedIn Pipeline İstatistikleri*
+
+Toplam üretilen post: *${total}*
+
+Varyant tercihleri:
+  A (Veri): ${pref.a} kez (${total > 0 ? Math.round(pref.a/total*100) : 0}%)
+  B (Hikaye): ${pref.b} kez (${total > 0 ? Math.round(pref.b/total*100) : 0}%)
+  C (Tartışma): ${pref.c} kez (${total > 0 ? Math.round(pref.c/total*100) : 0}%)
+
+🧠 Sistem her seçimden öğreniyor!`
+      );
+      return res.status(200).json({ ok: true });
+    }
 
     // /start
     if (text === '/start') {

@@ -1,7 +1,7 @@
 {
   "name": "linkedin-pipeline",
   "version": "1.0.0",
-  "description": "Otomatik LinkedIn içerik üretim pipeline'ı",
+  "description": "Self-Evolving LinkedIn içerik üretim pipeline'ı",
   "main": "api/webhook.js",
   "scripts": {
     "dev": "vercel dev"
